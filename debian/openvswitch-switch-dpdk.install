@@ -1,2 +1,2 @@
 #!/usr/bin/dh-exec
-_dpdk/vswitchd/ovs-vswitchd => /usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk
+usr/sbin/ovs-vswitchd => /usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk

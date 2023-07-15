@@ -12,17 +12,17 @@ usr/share/man/man1/ovsdb-client.1
 usr/share/man/man1/ovsdb-server.1
 usr/share/man/man1/ovsdb-tool.1
 usr/share/man/man5/ovsdb-server.5
-usr/share/man/man5/ovsdb.5
+usr/share/man/ovsdb.5 usr/share/man/man5/ovsdb.5
 usr/share/man/man5/ovsdb.local-config.5
-usr/share/man/man7/ovs-actions.7
+usr/share/man/ovs-actions.7 usr/share/man/man7/ovs-actions.7
 usr/share/man/man7/ovs-fields.7
-usr/share/man/man7/ovsdb-server.7
-usr/share/man/man7/ovsdb.7
-usr/share/man/man8/ovs-appctl.8
+usr/share/man/ovsdb-server.7 usr/share/man/man7/ovsdb-server.7
+usr/share/man/ovsdb.7 usr/share/man/man7/ovsdb.7
+usr/share/man/ovs-appctl.8 usr/share/man/man8/ovs-appctl.8
 usr/share/man/man8/ovs-bugtool.8
 usr/share/man/man8/ovs-ofctl.8
-usr/share/man/man8/ovs-parse-backtrace.8
-usr/share/man/man8/ovs-pki.8
+usr/share/man/ovs-parse-backtrace.8 usr/share/man/man8/ovs-parse-backtrace.8
+usr/share/man/ovs-pki.8 usr/share/man/man8/ovs-pki.8
 usr/share/openvswitch/bugtool-plugins
 usr/share/openvswitch/scripts/ovs-bugtool-*
 usr/share/openvswitch/scripts/ovs-lib

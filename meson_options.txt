@@ -1,0 +1,6 @@
+option('with-pthread', type : 'string', value : 'optval',
+       description : 'Path to the POSIX threads API library for Windows')
+option('with-dpdk', type : 'string', value : 'disable',
+       description : 'build with dpdk')
+option('disable-libs', type: 'string', value: '', description: 'disable options librarys')
+option('disable-doc', type: 'boolean', value: false, description: 'disable Document')

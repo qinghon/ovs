@@ -12,14 +12,14 @@ usr/bin/ovs-vlan-test
 usr/bin/ovs-vsctl
 usr/sbin/ovs-vswitchd usr/lib/openvswitch-switch/
 usr/share/man/man1/ovs-pcap.1
-usr/share/man/man1/ovs-tcpundump.1
+usr/share/man/ovs-tcpundump.1 usr/share/man/man1/ovs-tcpundump.1
 usr/share/man/man5/ovs-vswitchd.conf.db.5
-usr/share/man/man8/ovs-ctl.8
+usr/share/man/ovs-ctl.8 usr/share/man/man8/ovs-ctl.8
 usr/share/man/man8/ovs-dpctl-top.8
 usr/share/man/man8/ovs-dpctl.8
 usr/share/man/man8/ovs-kmod-ctl.8
-usr/share/man/man8/ovs-tcpdump.8
-usr/share/man/man8/ovs-vlan-test.8
+usr/share/man/ovs-tcpdump.8 usr/share/man/man8/ovs-tcpdump.8
+usr/share/man/ovs-vlan-test.8 usr/share/man/man8/ovs-vlan-test.8
 usr/share/man/man8/ovs-vsctl.8
 usr/share/man/man8/ovs-vswitchd.8
 usr/share/openvswitch/scripts/ovs-check-dead-ifs

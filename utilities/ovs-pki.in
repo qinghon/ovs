@@ -253,7 +253,7 @@ if test "$command" = "init"; then
 
         # Write CA configuration file.
         if test ! -e ca.cnf; then
-            sed "s/@ca@/$ca/g;s/@curr_date@/$curr_date/g" > ca.cnf <<'EOF'
+            sed "s/#CA_PADING#/$ca/g;s/#CURR_DATE#/$curr_date/g" > ca.cnf <<'EOF'
 [ req ]
 prompt = no
 distinguished_name = req_distinguished_name
@@ -263,8 +263,8 @@ C = US
 ST = CA
 L = Palo Alto
 O = Open vSwitch
-OU = @ca@
-CN = OVS @ca@ CA Certificate (@curr_date@)
+OU = #CA_PADING#
+CN = OVS #CA_PADING# CA Certificate (#CURR_DATE#)
 
 [ ca ]
 default_ca = the_ca
