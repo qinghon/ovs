@@ -324,8 +324,8 @@ A user can use this option to set a minimum frequency of Rx queue to PMD
 reassignment due to PMD Auto Load Balance. For example, this could be set
 (in min) such that a reassignment is triggered at most every few hours.
 
-PMD load based sleeping (Experimental)
---------------------------------------
+PMD load based sleeping
+-----------------------
 
 PMD threads constantly poll Rx queues which are assigned to them. In order to
 reduce the CPU cycles they use, they can sleep for small periods of time
@@ -334,7 +334,12 @@ when there is no load or very-low load on all the Rx queues they poll.
 This can be enabled by setting the max requested sleep time (in microseconds)
 for a PMD thread::
 
-    $ ovs-vsctl set open_vswitch . other_config:pmd-maxsleep=50
+    $ ovs-vsctl set open_vswitch . other_config:pmd-sleep-max=50
+
+.. note::
+
+    Previous config name 'pmd-maxsleep' is deprecated and will be removed in a
+    future release.
 
 With a non-zero max value a PMD may request to sleep by an incrementing amount
 of time up to the maximum time. If at any point the threshold of at least half
@@ -347,6 +352,10 @@ thread will not process packets. Sleep times requested are not guaranteed
 and can differ significantly depending on system configuration. The actual
 time not processing packets will be determined by the sleep and processor
 wake-up times and should be tested with each system configuration.
+
+The current configuration of the PMD load based sleeping can be shown with::
+
+    $ ovs-appctl dpif-netdev/pmd-sleep-show
 
 Sleep time statistics for 10 secs can be seen with::
 

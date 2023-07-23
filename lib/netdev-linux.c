@@ -484,9 +484,9 @@ static const struct tc_ops *const tcs[] = {
     NULL
 };
 
-static unsigned int tc_ticks_to_bytes(unsigned int rate, unsigned int ticks);
-static unsigned int tc_bytes_to_ticks(unsigned int rate, unsigned int size);
-static unsigned int tc_buffer_per_jiffy(unsigned int rate);
+static unsigned int tc_ticks_to_bytes(uint64_t rate, unsigned int ticks);
+static unsigned int tc_bytes_to_ticks(uint64_t rate, unsigned int size);
+static unsigned int tc_buffer_per_jiffy(uint64_t rate);
 static uint32_t tc_time_to_ticks(uint32_t time);
 
 static struct tcmsg *netdev_linux_tc_make_request(const struct netdev *,
@@ -494,7 +494,7 @@ static struct tcmsg *netdev_linux_tc_make_request(const struct netdev *,
                                                   unsigned int flags,
                                                   struct ofpbuf *);
 
-static int tc_add_policer(struct netdev *, uint32_t kbits_rate,
+static int tc_add_policer(struct netdev *, uint64_t kbits_rate,
                           uint32_t kbits_burst, uint32_t kpkts_rate,
                           uint32_t kpkts_burst);
 
@@ -510,12 +510,15 @@ static int tc_delete_class(const struct netdev *, unsigned int handle);
 
 static int tc_del_qdisc(struct netdev *netdev);
 static int tc_query_qdisc(const struct netdev *netdev);
+static void tc_policer_init(struct tc_police *tc_police, uint64_t kbits_rate,
+                            uint64_t kbits_burst);
 
 void
-tc_put_rtab(struct ofpbuf *msg, uint16_t type, const struct tc_ratespec *rate);
+tc_put_rtab(struct ofpbuf *msg, uint16_t type, const struct tc_ratespec *rate,
+            uint64_t rate64);
 static int tc_calc_cell_log(unsigned int mtu);
 static void tc_fill_rate(struct tc_ratespec *rate, uint64_t bps, int mtu);
-static int tc_calc_buffer(unsigned int Bps, int mtu, uint64_t burst_bytes);
+static int tc_calc_buffer(uint64_t Bps, int mtu, uint64_t burst_bytes);
 
 
 /* This is set pretty low because we probably won't learn anything from the
@@ -2382,7 +2385,6 @@ static void
 netdev_linux_read_features(struct netdev_linux *netdev)
 {
     struct ethtool_cmd ecmd;
-    uint32_t speed;
     int error;
 
     if (netdev->cache_valid & VALID_FEATURES) {
@@ -2496,20 +2498,20 @@ netdev_linux_read_features(struct netdev_linux *netdev)
     }
 
     /* Current settings. */
-    speed = ethtool_cmd_speed(&ecmd);
-    if (speed == SPEED_10) {
+    netdev->current_speed = ethtool_cmd_speed(&ecmd);
+    if (netdev->current_speed == SPEED_10) {
         netdev->current = ecmd.duplex ? NETDEV_F_10MB_FD : NETDEV_F_10MB_HD;
-    } else if (speed == SPEED_100) {
+    } else if (netdev->current_speed == SPEED_100) {
         netdev->current = ecmd.duplex ? NETDEV_F_100MB_FD : NETDEV_F_100MB_HD;
-    } else if (speed == SPEED_1000) {
+    } else if (netdev->current_speed == SPEED_1000) {
         netdev->current = ecmd.duplex ? NETDEV_F_1GB_FD : NETDEV_F_1GB_HD;
-    } else if (speed == SPEED_10000) {
+    } else if (netdev->current_speed == SPEED_10000) {
         netdev->current = NETDEV_F_10GB_FD;
-    } else if (speed == 40000) {
+    } else if (netdev->current_speed == 40000) {
         netdev->current = NETDEV_F_40GB_FD;
-    } else if (speed == 100000) {
+    } else if (netdev->current_speed == 100000) {
         netdev->current = NETDEV_F_100GB_FD;
-    } else if (speed == 1000000) {
+    } else if (netdev->current_speed == 1000000) {
         netdev->current = NETDEV_F_1TB_FD;
     } else {
         netdev->current = 0;
@@ -2555,6 +2557,33 @@ netdev_linux_get_features(const struct netdev *netdev_,
         *advertised = netdev->advertised;
         *supported = netdev->supported;
         *peer = 0;              /* XXX */
+    }
+    error = netdev->get_features_error;
+
+exit:
+    ovs_mutex_unlock(&netdev->mutex);
+    return error;
+}
+
+static int
+netdev_linux_get_speed(const struct netdev *netdev_, uint32_t *current,
+                       uint32_t *max)
+{
+    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
+    int error;
+
+    ovs_mutex_lock(&netdev->mutex);
+    if (netdev_linux_netnsid_is_remote(netdev)) {
+        error = EOPNOTSUPP;
+        goto exit;
+    }
+
+    netdev_linux_read_features(netdev);
+    if (!netdev->get_features_error) {
+        *current = netdev->current_speed == SPEED_UNKNOWN
+                   ? 0 : netdev->current_speed;
+        *max = MIN(UINT32_MAX,
+                   netdev_features_to_bps(netdev->supported, 0) / 1000000ULL);
     }
     error = netdev->get_features_error;
 
@@ -2634,29 +2663,6 @@ exit:
     return error;
 }
 
-static struct tc_police
-tc_matchall_fill_police(uint32_t kbits_rate, uint32_t kbits_burst)
-{
-    unsigned int bsize = MIN(UINT32_MAX / 1024, kbits_burst) * 1024 / 8;
-    unsigned int bps = ((uint64_t) kbits_rate * 1000) / 8;
-    struct tc_police police;
-    struct tc_ratespec rate;
-    int mtu = 65535;
-
-    memset(&rate, 0, sizeof rate);
-    rate.rate = bps;
-    rate.cell_log = tc_calc_cell_log(mtu);
-    rate.mpu = ETH_TOTAL_MIN;
-
-    memset(&police, 0, sizeof police);
-    police.burst = tc_bytes_to_ticks(bps, bsize);
-    police.action = TC_POLICE_SHOT;
-    police.rate = rate;
-    police.mtu = mtu;
-
-    return police;
-}
-
 static void
 nl_msg_act_police_start_nest(struct ofpbuf *request, uint32_t prio,
                              size_t *offset, size_t *act_offset,
@@ -2683,22 +2689,33 @@ nl_msg_act_police_end_nest(struct ofpbuf *request, size_t offset,
 }
 
 static void
-nl_msg_put_act_police(struct ofpbuf *request, struct tc_police *police,
+nl_msg_put_act_police(struct ofpbuf *request, uint32_t index,
+                      uint64_t kbits_rate, uint64_t kbits_burst,
                       uint64_t pkts_rate, uint64_t pkts_burst,
                       uint32_t notexceed_act, bool single_action)
 {
+    uint64_t bytes_rate = kbits_rate / 8 * 1000;
     size_t offset, act_offset;
+    struct tc_police police;
     uint32_t prio = 0;
 
-    if (!police->rate.rate && !pkts_rate) {
+    if (!kbits_rate && !pkts_rate) {
         return;
     }
 
+    tc_policer_init(&police, kbits_rate, kbits_burst);
+    police.index = index;
+
     nl_msg_act_police_start_nest(request, ++prio, &offset, &act_offset,
                                  single_action);
-    if (police->rate.rate) {
-        tc_put_rtab(request, TCA_POLICE_RATE, &police->rate);
+    if (police.rate.rate) {
+        tc_put_rtab(request, TCA_POLICE_RATE, &police.rate, bytes_rate);
     }
+#ifdef HAVE_TCA_POLICE_PKTRATE64
+    if (bytes_rate > UINT32_MAX) {
+        nl_msg_put_u64(request, TCA_POLICE_RATE64, bytes_rate);
+    }
+#endif
     if (pkts_rate) {
         uint64_t pkt_burst_ticks;
         /* Here tc_bytes_to_ticks is used to convert packets rather than bytes
@@ -2707,12 +2724,12 @@ nl_msg_put_act_police(struct ofpbuf *request, struct tc_police *police,
         nl_msg_put_u64(request, TCA_POLICE_PKTRATE64, pkts_rate);
         nl_msg_put_u64(request, TCA_POLICE_PKTBURST64, pkt_burst_ticks);
     }
-    nl_msg_put_unspec(request, TCA_POLICE_TBF, police, sizeof *police);
+    nl_msg_put_unspec(request, TCA_POLICE_TBF, &police, sizeof police);
     nl_msg_act_police_end_nest(request, offset, act_offset, notexceed_act);
 }
 
 static int
-tc_add_matchall_policer(struct netdev *netdev, uint32_t kbits_rate,
+tc_add_matchall_policer(struct netdev *netdev, uint64_t kbits_rate,
                         uint32_t kbits_burst, uint32_t kpkts_rate,
                         uint32_t kpkts_burst)
 {
@@ -2720,7 +2737,6 @@ tc_add_matchall_policer(struct netdev *netdev, uint32_t kbits_rate,
     size_t basic_offset, action_offset;
     uint16_t prio = TC_RESERVED_PRIORITY_POLICE;
     int ifindex, err = 0;
-    struct tc_police pol_act;
     struct ofpbuf request;
     struct ofpbuf *reply;
     struct tcmsg *tcmsg;
@@ -2737,12 +2753,12 @@ tc_add_matchall_policer(struct netdev *netdev, uint32_t kbits_rate,
     tcmsg->tcm_info = tc_make_handle(prio, eth_type);
     tcmsg->tcm_handle = handle;
 
-    pol_act = tc_matchall_fill_police(kbits_rate, kbits_burst);
     nl_msg_put_string(&request, TCA_KIND, "matchall");
     basic_offset = nl_msg_start_nested(&request, TCA_OPTIONS);
     action_offset = nl_msg_start_nested(&request, TCA_MATCHALL_ACT);
-    nl_msg_put_act_police(&request, &pol_act, kpkts_rate * 1000,
-                          kpkts_burst * 1000, TC_ACT_UNSPEC, false);
+    nl_msg_put_act_police(&request, 0, kbits_rate, kbits_burst,
+                          kpkts_rate * 1000, kpkts_burst * 1000, TC_ACT_UNSPEC,
+                          false);
     nl_msg_end_nested(&request, action_offset);
     nl_msg_end_nested(&request, basic_offset);
 
@@ -3697,6 +3713,7 @@ const struct netdev_class netdev_linux_class = {
     .destruct = netdev_linux_destruct,
     .get_stats = netdev_linux_get_stats,
     .get_features = netdev_linux_get_features,
+    .get_speed = netdev_linux_get_speed,
     .get_status = netdev_linux_get_status,
     .get_block_id = netdev_linux_get_block_id,
     .send = netdev_linux_send,
@@ -3713,6 +3730,7 @@ const struct netdev_class netdev_tap_class = {
     .destruct = netdev_linux_destruct,
     .get_stats = netdev_tap_get_stats,
     .get_features = netdev_linux_get_features,
+    .get_speed = netdev_linux_get_speed,
     .get_status = netdev_linux_get_status,
     .send = netdev_linux_send,
     .rxq_construct = netdev_linux_rxq_construct,
@@ -4572,13 +4590,13 @@ static const struct tc_ops tc_ops_netem = {
 
 struct htb {
     struct tc tc;
-    unsigned int max_rate;      /* In bytes/s. */
+    uint64_t max_rate;          /* In bytes/s. */
 };
 
 struct htb_class {
     struct tc_queue tc_queue;
-    unsigned int min_rate;      /* In bytes/s. */
-    unsigned int max_rate;      /* In bytes/s. */
+    uint64_t min_rate;          /* In bytes/s. */
+    uint64_t max_rate;          /* In bytes/s. */
     unsigned int burst;         /* In bytes. */
     unsigned int priority;      /* Lower values are higher priorities. */
 };
@@ -4666,8 +4684,8 @@ htb_setup_class__(struct netdev *netdev, unsigned int handle,
     if ((class->min_rate / HTB_RATE2QUANTUM) < mtu) {
         opt.quantum = mtu;
     }
-    opt.buffer = tc_calc_buffer(opt.rate.rate, mtu, class->burst);
-    opt.cbuffer = tc_calc_buffer(opt.ceil.rate, mtu, class->burst);
+    opt.buffer = tc_calc_buffer(class->min_rate, mtu, class->burst);
+    opt.cbuffer = tc_calc_buffer(class->max_rate, mtu, class->burst);
     opt.prio = class->priority;
 
     tcmsg = netdev_linux_tc_make_request(netdev, RTM_NEWTCLASS, NLM_F_CREATE,
@@ -4680,15 +4698,26 @@ htb_setup_class__(struct netdev *netdev, unsigned int handle,
 
     nl_msg_put_string(&request, TCA_KIND, "htb");
     opt_offset = nl_msg_start_nested(&request, TCA_OPTIONS);
+
+#ifdef HAVE_TCA_HTB_RATE64
+    if (class->min_rate > UINT32_MAX) {
+        nl_msg_put_u64(&request, TCA_HTB_RATE64, class->min_rate);
+    }
+    if (class->max_rate > UINT32_MAX) {
+        nl_msg_put_u64(&request, TCA_HTB_CEIL64, class->max_rate);
+    }
+#endif
     nl_msg_put_unspec(&request, TCA_HTB_PARMS, &opt, sizeof opt);
-    tc_put_rtab(&request, TCA_HTB_RTAB, &opt.rate);
-    tc_put_rtab(&request, TCA_HTB_CTAB, &opt.ceil);
+
+    tc_put_rtab(&request, TCA_HTB_RTAB, &opt.rate, class->min_rate);
+    tc_put_rtab(&request, TCA_HTB_CTAB, &opt.ceil, class->max_rate);
     nl_msg_end_nested(&request, opt_offset);
 
     error = tc_transact(&request, NULL);
     if (error) {
         VLOG_WARN_RL(&rl, "failed to replace %s class %u:%u, parent %u:%u, "
-                     "min_rate=%u max_rate=%u burst=%u prio=%u (%s)",
+                     "min_rate=%"PRIu64" max_rate=%"PRIu64" burst=%u prio=%u "
+                     "(%s)",
                      netdev_get_name(netdev),
                      tc_get_major(handle), tc_get_minor(handle),
                      tc_get_major(parent), tc_get_minor(parent),
@@ -4708,6 +4737,10 @@ htb_parse_tca_options__(struct nlattr *nl_options, struct htb_class *class)
     static const struct nl_policy tca_htb_policy[] = {
         [TCA_HTB_PARMS] = { .type = NL_A_UNSPEC, .optional = false,
                             .min_len = sizeof(struct tc_htb_opt) },
+#ifdef HAVE_TCA_HTB_RATE64
+        [TCA_HTB_RATE64] = { .type = NL_A_U64, .optional = true },
+        [TCA_HTB_CEIL64] = { .type = NL_A_U64, .optional = true },
+#endif
     };
 
     struct nlattr *attrs[ARRAY_SIZE(tca_htb_policy)];
@@ -4722,7 +4755,15 @@ htb_parse_tca_options__(struct nlattr *nl_options, struct htb_class *class)
     htb = nl_attr_get(attrs[TCA_HTB_PARMS]);
     class->min_rate = htb->rate.rate;
     class->max_rate = htb->ceil.rate;
-    class->burst = tc_ticks_to_bytes(htb->rate.rate, htb->buffer);
+#ifdef HAVE_TCA_HTB_RATE64
+    if (attrs[TCA_HTB_RATE64]) {
+        class->min_rate = nl_attr_get_u64(attrs[TCA_HTB_RATE64]);
+    }
+    if (attrs[TCA_HTB_CEIL64]) {
+        class->max_rate = nl_attr_get_u64(attrs[TCA_HTB_CEIL64]);
+    }
+#endif
+    class->burst = tc_ticks_to_bytes(class->min_rate, htb->buffer);
     class->priority = htb->prio;
     return 0;
 }
@@ -4753,18 +4794,16 @@ htb_parse_tcmsg__(struct ofpbuf *tcmsg, unsigned int *queue_id,
 }
 
 static void
-htb_parse_qdisc_details__(struct netdev *netdev_,
-                          const struct smap *details, struct htb_class *hc)
+htb_parse_qdisc_details__(struct netdev *netdev, const struct smap *details,
+                          struct htb_class *hc)
 {
-    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
-
     hc->max_rate = smap_get_ullong(details, "max-rate", 0) / 8;
     if (!hc->max_rate) {
-        enum netdev_features current;
+        uint32_t current_speed;
 
-        netdev_linux_read_features(netdev);
-        current = !netdev->get_features_error ? netdev->current : 0;
-        hc->max_rate = netdev_features_to_bps(current, NETDEV_DEFAULT_BPS) / 8;
+        netdev_get_speed(netdev, &current_speed, NULL);
+        hc->max_rate = current_speed ? current_speed / 8 * 1000000ULL
+                                     : NETDEV_DEFAULT_BPS / 8;
     }
     hc->min_rate = hc->max_rate;
     hc->burst = 0;
@@ -5225,18 +5264,16 @@ hfsc_query_class__(const struct netdev *netdev, unsigned int handle,
 }
 
 static void
-hfsc_parse_qdisc_details__(struct netdev *netdev_, const struct smap *details,
+hfsc_parse_qdisc_details__(struct netdev *netdev, const struct smap *details,
                            struct hfsc_class *class)
 {
-    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
-
     uint32_t max_rate = smap_get_ullong(details, "max-rate", 0) / 8;
     if (!max_rate) {
-        enum netdev_features current;
+        uint32_t current_speed;
 
-        netdev_linux_read_features(netdev);
-        current = !netdev->get_features_error ? netdev->current : 0;
-        max_rate = netdev_features_to_bps(current, NETDEV_DEFAULT_BPS) / 8;
+        netdev_get_speed(netdev, &current_speed, NULL);
+        max_rate = current_speed ? current_speed / 8 * 1000000ULL
+                                 : NETDEV_DEFAULT_BPS / 8;
     }
 
     class->min_rate = max_rate;
@@ -5711,12 +5748,10 @@ tc_policer_init(struct tc_police *tc_police, uint64_t kbits_rate,
  * Returns 0 if successful, otherwise a positive errno value.
  */
 static int
-tc_add_policer(struct netdev *netdev, uint32_t kbits_rate,
-               uint32_t kbits_burst, uint32_t kpkts_rate,
-               uint32_t kpkts_burst)
+tc_add_policer(struct netdev *netdev, uint64_t kbits_rate,
+               uint32_t kbits_burst, uint32_t kpkts_rate, uint32_t kpkts_burst)
 {
     size_t basic_offset, police_offset;
-    struct tc_police tc_police;
     struct ofpbuf request;
     struct tcmsg *tcmsg;
     int error;
@@ -5733,9 +5768,9 @@ tc_add_policer(struct netdev *netdev, uint32_t kbits_rate,
 
     basic_offset = nl_msg_start_nested(&request, TCA_OPTIONS);
     police_offset = nl_msg_start_nested(&request, TCA_BASIC_ACT);
-    tc_policer_init(&tc_police, kbits_rate, kbits_burst);
-    nl_msg_put_act_police(&request, &tc_police, kpkts_rate * 1000ULL,
-                          kpkts_burst * 1000ULL, TC_ACT_UNSPEC, false);
+    nl_msg_put_act_police(&request, 0, kbits_rate, kbits_burst,
+                          kpkts_rate * 1000ULL, kpkts_burst * 1000ULL,
+                          TC_ACT_UNSPEC, false);
     nl_msg_end_nested(&request, police_offset);
     nl_msg_end_nested(&request, basic_offset);
 
@@ -5748,19 +5783,15 @@ tc_add_policer(struct netdev *netdev, uint32_t kbits_rate,
 }
 
 int
-tc_add_policer_action(uint32_t index, uint32_t kbits_rate,
+tc_add_policer_action(uint32_t index, uint64_t kbits_rate,
                       uint32_t kbits_burst, uint32_t pkts_rate,
                       uint32_t pkts_burst, bool update)
 {
-    struct tc_police tc_police;
     struct ofpbuf request;
     struct tcamsg *tcamsg;
     size_t offset;
     int flags;
     int error;
-
-    tc_policer_init(&tc_police, kbits_rate, kbits_burst);
-    tc_police.index = index;
 
     flags = (update ? NLM_F_REPLACE : NLM_F_EXCL) | NLM_F_CREATE;
     tcamsg = tc_make_action_request(RTM_NEWACTION, flags, &request);
@@ -5769,8 +5800,8 @@ tc_add_policer_action(uint32_t index, uint32_t kbits_rate,
     }
 
     offset = nl_msg_start_nested(&request, TCA_ACT_TAB);
-    nl_msg_put_act_police(&request, &tc_police, pkts_rate, pkts_burst,
-                          TC_ACT_PIPE, true);
+    nl_msg_put_act_police(&request, index, kbits_rate, kbits_burst, pkts_rate,
+                          pkts_burst, TC_ACT_PIPE, true);
     nl_msg_end_nested(&request, offset);
 
     error = tc_transact(&request, NULL);
@@ -5986,7 +6017,7 @@ exit:
 /* Returns the number of bytes that can be transmitted in 'ticks' ticks at a
  * rate of 'rate' bytes per second. */
 static unsigned int
-tc_ticks_to_bytes(unsigned int rate, unsigned int ticks)
+tc_ticks_to_bytes(uint64_t rate, unsigned int ticks)
 {
     read_psched();
     return (rate * ticks) / ticks_per_s;
@@ -5995,7 +6026,7 @@ tc_ticks_to_bytes(unsigned int rate, unsigned int ticks)
 /* Returns the number of ticks that it would take to transmit 'size' bytes at a
  * rate of 'rate' bytes per second. */
 static unsigned int
-tc_bytes_to_ticks(unsigned int rate, unsigned int size)
+tc_bytes_to_ticks(uint64_t rate, unsigned int size)
 {
     read_psched();
     return rate ? ((unsigned long long int) ticks_per_s * size) / rate : 0;
@@ -6004,7 +6035,7 @@ tc_bytes_to_ticks(unsigned int rate, unsigned int size)
 /* Returns the number of bytes that need to be reserved for qdisc buffering at
  * a transmission rate of 'rate' bytes per second. */
 static unsigned int
-tc_buffer_per_jiffy(unsigned int rate)
+tc_buffer_per_jiffy(uint64_t rate)
 {
     read_psched();
     return rate / buffer_hz;
@@ -6367,15 +6398,19 @@ tc_fill_rate(struct tc_ratespec *rate, uint64_t Bps, int mtu)
     /* rate->overhead = 0; */           /* New in 2.6.24, not yet in some */
     /* rate->cell_align = 0; */         /* distro headers. */
     rate->mpu = ETH_TOTAL_MIN;
-    rate->rate = Bps;
+    rate->rate = MIN(UINT32_MAX, Bps);
 }
 
 /* Appends to 'msg' an "rtab" table for the specified 'rate' as a Netlink
  * attribute of the specified "type".
  *
+ * A 64-bit rate can be provided via 'rate64' in bps.
+ * If zero, the rate in 'rate' will be used.
+ *
  * See tc_calc_cell_log() above for a description of "rtab"s. */
 void
-tc_put_rtab(struct ofpbuf *msg, uint16_t type, const struct tc_ratespec *rate)
+tc_put_rtab(struct ofpbuf *msg, uint16_t type, const struct tc_ratespec *rate,
+            uint64_t rate64)
 {
     uint32_t *rtab;
     unsigned int i;
@@ -6386,7 +6421,7 @@ tc_put_rtab(struct ofpbuf *msg, uint16_t type, const struct tc_ratespec *rate)
         if (packet_size < rate->mpu) {
             packet_size = rate->mpu;
         }
-        rtab[i] = tc_bytes_to_ticks(rate->rate, packet_size);
+        rtab[i] = tc_bytes_to_ticks(rate64 ? rate64 : rate->rate, packet_size);
     }
 }
 
@@ -6395,7 +6430,7 @@ tc_put_rtab(struct ofpbuf *msg, uint16_t type, const struct tc_ratespec *rate)
  * burst size of 'burst_bytes'.  (If no value was requested, a 'burst_bytes' of
  * 0 is fine.) */
 static int
-tc_calc_buffer(unsigned int Bps, int mtu, uint64_t burst_bytes)
+tc_calc_buffer(uint64_t Bps, int mtu, uint64_t burst_bytes)
 {
     unsigned int min_burst = tc_buffer_per_jiffy(Bps) + mtu;
     return tc_bytes_to_ticks(Bps, MAX(burst_bytes, min_burst));

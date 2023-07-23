@@ -98,6 +98,7 @@ Bruce Davie                        bdavie@vmware.com
 Bryan Phillippe                    bp@toroki.com
 Carlo Andreotti                    c.andreotti@m3s.it
 Casey Barker                       crbarker@google.com
+Chandan Somani                     csomani@redhat.com
 Chandra Sekhar Vejendla            csvejend@us.ibm.com
 Chris Wright                       chrisw@sous-sol.org
 Christoph Jaeger                   cj@linux.com
@@ -165,6 +166,7 @@ Eziz Durdyyev                      ezizdurdy@gmail.com
 Fabrizio D'Angelo                  fdangelo@redhat.com
 Faicker Mo                         faicker.mo@ucloud.cn
 Fangrui Song                       maskray@google.com
+Felix Huettner                     felix.huettner@mail.schwarz
 Fengqi Li                          lifengqi@inspur.com
 Flavio Fernandes                   flavio@flaviof.com
 Flavio Leitner                     fbl@redhat.com
@@ -211,6 +213,7 @@ Jakub Libosvar                     libosvar@redhat.com
 Jakub Sitnicki                     jsitnicki@gmail.com
 James P.                           roampune@gmail.com
 James Page                         james.page@ubuntu.com
+James Raphael Tiovalen             jamestiotio@gmail.com
 Jamie Lennox                       jamielennox@gmail.com
 Jan Scheurich                      jan.scheurich@ericsson.com
 Jan Vansteenkiste                  jan@vstone.eu
@@ -396,6 +399,7 @@ Sanjay Sane
 Saurabh Mohan                      saurabh@cplanenetworks.com
 Saurabh Shah
 Saurabh Shrivastava                saurabh.shrivastava@nuagenetworks.net
+Sayali Naval                       sanaval@cisco.com
 Scott Cheloha                      scottcheloha@gmail.com
 Scott Lowe                         scott.lowe@scottlowe.org
 Scott Mann                         sdmnix@gmail.com

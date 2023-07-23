@@ -39,6 +39,7 @@
 #include "coverage.h"
 #include "netlink-socket.h"
 #include "netlink.h"
+#include "odp-util.h"
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/util.h"
 #include "openvswitch/vlog.h"
@@ -700,8 +701,40 @@ nl_parse_geneve_key(const struct nlattr *in_nlattr,
 }
 
 static int
+nl_parse_vxlan_key(const struct nlattr *in_nlattr,
+                   struct tc_flower_tunnel *tunnel)
+{
+    const struct ofpbuf *msg;
+    struct nlattr *nla;
+    struct ofpbuf buf;
+    uint32_t gbp_raw;
+    size_t left;
+
+    nl_attr_get_nested(in_nlattr, &buf);
+    msg = &buf;
+
+    NL_ATTR_FOR_EACH (nla, left, ofpbuf_at(msg, 0, 0), msg->size) {
+        uint16_t type = nl_attr_type(nla);
+
+        switch (type) {
+        case TCA_FLOWER_KEY_ENC_OPT_VXLAN_GBP:
+            gbp_raw = nl_attr_get_u32(nla);
+            odp_decode_gbp_raw(gbp_raw, &tunnel->gbp.id,
+                               &tunnel->gbp.flags);
+            tunnel->gbp.id_present = true;
+            break;
+        default:
+            VLOG_WARN_RL(&error_rl, "failed to parse vxlan tun options");
+            return EINVAL;
+        }
+    }
+
+    return 0;
+}
+
+static int
 nl_parse_flower_tunnel_opts(struct nlattr *options,
-                            struct tun_metadata *metadata)
+                            struct tc_flower_tunnel *tunnel)
 {
     const struct ofpbuf *msg;
     struct nlattr *nla;
@@ -716,7 +749,14 @@ nl_parse_flower_tunnel_opts(struct nlattr *options,
         uint16_t type = nl_attr_type(nla);
         switch (type) {
         case TCA_FLOWER_KEY_ENC_OPTS_GENEVE:
-            err = nl_parse_geneve_key(nla, metadata);
+            err = nl_parse_geneve_key(nla, &tunnel->metadata);
+            if (err) {
+                return err;
+            }
+
+            break;
+        case TCA_FLOWER_KEY_ENC_OPTS_VXLAN:
+            err = nl_parse_vxlan_key(nla, tunnel);
             if (err) {
                 return err;
             }
@@ -828,13 +868,13 @@ nl_parse_flower_tunnel(struct nlattr **attrs, struct tc_flower *flower)
     if (attrs[TCA_FLOWER_KEY_ENC_OPTS] &&
         attrs[TCA_FLOWER_KEY_ENC_OPTS_MASK]) {
          err = nl_parse_flower_tunnel_opts(attrs[TCA_FLOWER_KEY_ENC_OPTS],
-                                           &flower->key.tunnel.metadata);
+                                           &flower->key.tunnel);
          if (err) {
              return err;
          }
 
          err = nl_parse_flower_tunnel_opts(attrs[TCA_FLOWER_KEY_ENC_OPTS_MASK],
-                                           &flower->mask.tunnel.metadata);
+                                           &flower->mask.tunnel);
          if (err) {
              return err;
          }
@@ -1251,6 +1291,35 @@ nl_parse_act_geneve_opts(const struct nlattr *in_nlattr,
 }
 
 static int
+nl_parse_act_vxlan_opts(struct nlattr *in_nlattr, struct tc_action *action)
+{
+    const struct ofpbuf *msg;
+    struct nlattr *nla;
+    struct ofpbuf buf;
+    size_t left;
+
+    nl_attr_get_nested(in_nlattr, &buf);
+    msg = &buf;
+
+    NL_ATTR_FOR_EACH (nla, left, ofpbuf_at(msg, 0, 0), msg->size) {
+        uint16_t type = nl_attr_type(nla);
+        int32_t gbp_raw;
+
+        switch (type) {
+        case TCA_FLOWER_KEY_ENC_OPT_VXLAN_GBP:
+            gbp_raw = nl_attr_get_u32(nla);
+            odp_decode_gbp_raw(gbp_raw, &action->encap.gbp.id,
+                               &action->encap.gbp.flags);
+            action->encap.gbp.id_present = true;
+
+            break;
+        }
+    }
+
+    return 0;
+}
+
+static int
 nl_parse_act_tunnel_opts(struct nlattr *options, struct tc_action *action)
 {
     const struct ofpbuf *msg;
@@ -1274,7 +1343,12 @@ nl_parse_act_tunnel_opts(struct nlattr *options, struct tc_action *action)
             if (err) {
                 return err;
             }
-
+            break;
+        case TCA_TUNNEL_KEY_ENC_OPTS_VXLAN:
+            err = nl_parse_act_vxlan_opts(nla, action);
+            if (err) {
+                return err;
+            }
             break;
         }
     }
@@ -1430,6 +1504,8 @@ static const struct nl_policy police_policy[] = {
     [TCA_POLICE_RATE] = { .type = NL_A_UNSPEC,
                           .min_len = 1024,
                           .optional = true, },
+    [TCA_POLICE_RATE64] = { .type = NL_A_U32,
+                            .optional = true, },
     [TCA_POLICE_PEAKRATE] = { .type = NL_A_UNSPEC,
                               .min_len = 1024,
                               .optional = true, },
@@ -2601,13 +2677,30 @@ nl_msg_put_act_tunnel_geneve_option(struct ofpbuf *request,
 }
 
 static void
-nl_msg_put_act_tunnel_key_set(struct ofpbuf *request, bool id_present,
-                              ovs_be64 id, ovs_be32 ipv4_src,
-                              ovs_be32 ipv4_dst, struct in6_addr *ipv6_src,
-                              struct in6_addr *ipv6_dst,
-                              ovs_be16 tp_dst, uint8_t tos, uint8_t ttl,
-                              struct tun_metadata *tun_metadata,
-                              uint8_t no_csum, uint32_t action_pc)
+nl_msg_put_act_tunnel_vxlan_opts(struct ofpbuf *request,
+                                 struct tc_action_encap *encap)
+{
+    size_t outer, inner;
+    uint32_t gbp_raw;
+
+    if (!encap->gbp.id_present) {
+        return;
+    }
+
+    gbp_raw = odp_encode_gbp_raw(encap->gbp.flags,
+                                 encap->gbp.id);
+    outer = nl_msg_start_nested_with_flag(request, TCA_TUNNEL_KEY_ENC_OPTS);
+    inner = nl_msg_start_nested_with_flag(request,
+                                          TCA_TUNNEL_KEY_ENC_OPTS_VXLAN);
+    nl_msg_put_u32(request, TCA_TUNNEL_KEY_ENC_OPT_VXLAN_GBP, gbp_raw);
+    nl_msg_end_nested(request, inner);
+    nl_msg_end_nested(request, outer);
+}
+
+static void
+nl_msg_put_act_tunnel_key_set(struct ofpbuf *request,
+                              struct tc_action_encap *encap,
+                              uint32_t action_pc)
 {
     size_t offset;
 
@@ -2619,30 +2712,34 @@ nl_msg_put_act_tunnel_key_set(struct ofpbuf *request, bool id_present,
 
         nl_msg_put_unspec(request, TCA_TUNNEL_KEY_PARMS, &tun, sizeof tun);
 
-        ovs_be32 id32 = be64_to_be32(id);
-        if (id_present) {
+        ovs_be32 id32 = be64_to_be32(encap->id);
+        if (encap->id_present) {
             nl_msg_put_be32(request, TCA_TUNNEL_KEY_ENC_KEY_ID, id32);
         }
-        if (ipv4_dst) {
-            nl_msg_put_be32(request, TCA_TUNNEL_KEY_ENC_IPV4_SRC, ipv4_src);
-            nl_msg_put_be32(request, TCA_TUNNEL_KEY_ENC_IPV4_DST, ipv4_dst);
-        } else if (ipv6_addr_is_set(ipv6_dst)) {
+        if (encap->ipv4.ipv4_dst) {
+            nl_msg_put_be32(request, TCA_TUNNEL_KEY_ENC_IPV4_SRC,
+                            encap->ipv4.ipv4_src);
+            nl_msg_put_be32(request, TCA_TUNNEL_KEY_ENC_IPV4_DST,
+                            encap->ipv4.ipv4_dst);
+        } else if (ipv6_addr_is_set(&encap->ipv6.ipv6_dst)) {
             nl_msg_put_in6_addr(request, TCA_TUNNEL_KEY_ENC_IPV6_DST,
-                                ipv6_dst);
+                                &encap->ipv6.ipv6_dst);
             nl_msg_put_in6_addr(request, TCA_TUNNEL_KEY_ENC_IPV6_SRC,
-                                ipv6_src);
+                                &encap->ipv6.ipv6_src);
         }
-        if (tos) {
-            nl_msg_put_u8(request, TCA_TUNNEL_KEY_ENC_TOS, tos);
+        if (encap->tos) {
+            nl_msg_put_u8(request, TCA_TUNNEL_KEY_ENC_TOS, encap->tos);
         }
-        if (ttl) {
-            nl_msg_put_u8(request, TCA_TUNNEL_KEY_ENC_TTL, ttl);
+        if (encap->ttl) {
+            nl_msg_put_u8(request, TCA_TUNNEL_KEY_ENC_TTL, encap->ttl);
         }
-        if (tp_dst) {
-            nl_msg_put_be16(request, TCA_TUNNEL_KEY_ENC_DST_PORT, tp_dst);
+        if (encap->tp_dst) {
+            nl_msg_put_be16(request, TCA_TUNNEL_KEY_ENC_DST_PORT,
+                            encap->tp_dst);
         }
-        nl_msg_put_act_tunnel_geneve_option(request, tun_metadata);
-        nl_msg_put_u8(request, TCA_TUNNEL_KEY_NO_CSUM, no_csum);
+        nl_msg_put_act_tunnel_vxlan_opts(request, encap);
+        nl_msg_put_act_tunnel_geneve_option(request, &encap->data);
+        nl_msg_put_u8(request, TCA_TUNNEL_KEY_NO_CSUM, encap->no_csum);
     }
     nl_msg_end_nested(request, offset);
 }
@@ -3265,17 +3362,7 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
                 }
 
                 act_offset = nl_msg_start_nested(request, act_index++);
-                nl_msg_put_act_tunnel_key_set(request, action->encap.id_present,
-                                              action->encap.id,
-                                              action->encap.ipv4.ipv4_src,
-                                              action->encap.ipv4.ipv4_dst,
-                                              &action->encap.ipv6.ipv6_src,
-                                              &action->encap.ipv6.ipv6_dst,
-                                              action->encap.tp_dst,
-                                              action->encap.tos,
-                                              action->encap.ttl,
-                                              &action->encap.data,
-                                              action->encap.no_csum,
+                nl_msg_put_act_tunnel_key_set(request, &action->encap,
                                               action_pc);
                 nl_msg_put_act_flags(request);
                 nl_msg_end_nested(request, act_offset);
@@ -3445,22 +3532,18 @@ nl_msg_put_masked_value(struct ofpbuf *request, uint16_t type,
 }
 
 static void
-nl_msg_put_flower_tunnel_opts(struct ofpbuf *request, uint16_t type,
-                              struct tun_metadata *metadata)
+nl_msg_put_flower_geneve(struct ofpbuf *request,
+                         const struct tc_flower_tunnel *tunnel)
 {
-    struct geneve_opt *opt;
-    size_t outer, inner;
+    const struct tun_metadata *metadata = &tunnel->metadata;
+    const struct geneve_opt *opt;
     int len, cnt = 0;
+    size_t offset;
 
     len = metadata->present.len;
-    if (!len) {
-        return;
-    }
-
-    outer = nl_msg_start_nested(request, type);
     while (len) {
         opt = &metadata->opts.gnv[cnt];
-        inner = nl_msg_start_nested(request, TCA_FLOWER_KEY_ENC_OPTS_GENEVE);
+        offset = nl_msg_start_nested(request, TCA_FLOWER_KEY_ENC_OPTS_GENEVE);
 
         nl_msg_put_be16(request, TCA_FLOWER_KEY_ENC_OPT_GENEVE_CLASS,
                         opt->opt_class);
@@ -3471,8 +3554,41 @@ nl_msg_put_flower_tunnel_opts(struct ofpbuf *request, uint16_t type,
         cnt += sizeof(struct geneve_opt) / 4 + opt->length;
         len -= sizeof(struct geneve_opt) + opt->length * 4;
 
-        nl_msg_end_nested(request, inner);
+        nl_msg_end_nested(request, offset);
     }
+}
+
+static void
+nl_msg_put_flower_vxlan_tun_opts(struct ofpbuf *request,
+                                 const struct tc_flower_tunnel *tunnel)
+{
+    uint32_t gbp_raw;
+    size_t offset;
+
+    if (!tunnel->gbp.id_present) {
+        return;
+    }
+
+    gbp_raw = odp_encode_gbp_raw(tunnel->gbp.flags, tunnel->gbp.id);
+    offset = nl_msg_start_nested_with_flag(request,
+                                           TCA_FLOWER_KEY_ENC_OPTS_VXLAN);
+    nl_msg_put_u32(request, TCA_FLOWER_KEY_ENC_OPT_VXLAN_GBP, gbp_raw);
+    nl_msg_end_nested(request, offset);
+}
+
+static void
+nl_msg_put_flower_tunnel_opts(struct ofpbuf *request, uint16_t type,
+                              struct tc_flower_tunnel *tunnel)
+{
+    size_t outer;
+
+    if (!tunnel->metadata.present.len && !tunnel->gbp.id_present) {
+        return;
+    }
+
+    outer = nl_msg_start_nested(request, type);
+    nl_msg_put_flower_geneve(request, tunnel);
+    nl_msg_put_flower_vxlan_tun_opts(request, tunnel);
     nl_msg_end_nested(request, outer);
 }
 
@@ -3536,9 +3652,9 @@ nl_msg_put_flower_tunnel(struct ofpbuf *request, struct tc_flower *flower)
         nl_msg_put_be32(request, TCA_FLOWER_KEY_ENC_KEY_ID, id);
     }
     nl_msg_put_flower_tunnel_opts(request, TCA_FLOWER_KEY_ENC_OPTS,
-                                  &flower->key.tunnel.metadata);
+                                  &flower->key.tunnel);
     nl_msg_put_flower_tunnel_opts(request, TCA_FLOWER_KEY_ENC_OPTS_MASK,
-                                  &flower->mask.tunnel.metadata);
+                                  &flower->mask.tunnel);
 }
 
 #define FLOWER_PUT_MASKED_VALUE(member, type) \
